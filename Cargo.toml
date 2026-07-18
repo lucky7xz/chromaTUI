@@ -1,0 +1,24 @@
+[package]
+name = "chromatui"
+version = "0.1.0"
+edition = "2021"
+description = "Chromatone spectrogram in the terminal — see the colors of what you sing"
+license = "MIT"
+
+[dependencies]
+anyhow = "1"
+cpal = "0.15"
+crossterm = "0.28"
+dirs = "5"
+ratatui = "0.29"
+realfft = "3"
+serde = { version = "1", features = ["derive"] }
+toml = "0.8"
+
+[profile.release]
+lto = true
+
+# Plain `cargo run` (debug) must stay smooth too — optimize the hot code even
+# in dev builds; compile time barely changes for a project this size.
+[profile.dev]
+opt-level = 2
