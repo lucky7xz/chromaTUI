@@ -8,7 +8,7 @@ use ratatui::buffer::Buffer;
 use ratatui::layout::{Alignment, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Clear, Paragraph};
+use ratatui::widgets::{Block, Borders, Clear, Paragraph, Widget};
 use ratatui::Frame;
 
 use crate::analysis::note_color;
@@ -28,6 +28,9 @@ pub fn draw(f: &mut Frame, app: &App) {
     draw_panel(f, area, app);
     if app.help_visible {
         draw_help(f, area, app);
+    }
+    if app.wheel_visible {
+        draw_wheel(f, area);
     }
     if app.pending_reset {
         draw_reset_prompt(f, area);
@@ -296,6 +299,7 @@ fn draw_help(f: &mut Frame, area: Rect, app: &App) {
     keyline("↑/↓ · tab · 1-7", "select a control");
     keyline("←/→", "adjust it (shift = coarse steps)");
     keyline("c", "auto-calibrate sensitivity (stay quiet ~1s)");
+    keyline("f", "note-color wheel (which note is which color)");
     keyline("o", "flip orientation");
     keyline("space / enter", "pause / clear the screen");
     keyline("r", "reset all settings to defaults");
@@ -374,12 +378,133 @@ mod tests {
     }
 
     #[test]
+    fn wheel_layout_is_a_clock_face() {
+        let backend = ratatui::backend::TestBackend::new(140, 35);
+        let mut term = ratatui::Terminal::new(backend).unwrap();
+        term.draw(|f| draw_wheel(f, f.area())).unwrap();
+        let buf = term.backend().buffer();
+
+        let mut lines = Vec::new();
+        for y in 0..buf.area.height {
+            let mut s = String::new();
+            for x in 0..buf.area.width {
+                s.push_str(buf[(x, y)].symbol());
+            }
+            lines.push(s);
+        }
+        let row_of = |needle: &str| {
+            lines
+                .iter()
+                .position(|l| l.contains(needle))
+                .unwrap_or_else(|| panic!("{needle} not on screen"))
+        };
+        // A sits at 12 o'clock, D# at 6 o'clock
+        assert!(row_of(" A ") < row_of("D#"));
+        // F# (9 o'clock) is left of C (3 o'clock) on the same row
+        let fs_row = row_of("F#");
+        assert_eq!(fs_row, row_of(" C "));
+        let line = &lines[fs_row];
+        assert!(line.find("F#").unwrap() < line.find(" C ").unwrap());
+        // credit is present
+        assert!(lines.iter().any(|l| l.contains("chromatone.center")));
+    }
+
+    #[test]
     fn clusters_average_their_colors() {
         let dark_red = (60, 0, 0);
         let (glyph, fg, bg) = quad_cell([RED, (205, 0, 0), dark_red, (0, 0, 0)]);
         assert_eq!(glyph, '▀');
         assert_eq!(fg, (230, 0, 0)); // avg of the two bright reds
         assert_eq!(bg, (30, 0, 0)); // avg of the two dark pixels
+    }
+}
+
+/// Note-color wheel (toggled with f): the 12 pitch classes arranged in a
+/// circle, ascending clockwise from A at the top, each in its chromatone
+/// color. Deliberately our own plain-swatch take rather than a copy of the
+/// chromatone.center wheel design — the color language is theirs and is
+/// credited on screen.
+fn draw_wheel(f: &mut Frame, area: Rect) {
+    let (w, h) = (58u16, 29u16);
+    let rect = Rect::new(
+        area.x + area.width.saturating_sub(w) / 2,
+        area.y + area.height.saturating_sub(h) / 2,
+        w.min(area.width),
+        h.min(area.height),
+    );
+    f.render_widget(Clear, rect);
+    f.render_widget(
+        Block::default().style(Style::default().bg(Color::Rgb(15, 15, 20))),
+        rect,
+    );
+
+    let mut center = |text: &str, y: u16, style: Style| {
+        let line = Rect::new(rect.x, y, rect.width, 1);
+        Paragraph::new(Line::from(Span::styled(text.to_string(), style)))
+            .alignment(Alignment::Center)
+            .render(line, f.buffer_mut());
+    };
+    center(
+        "note colors",
+        rect.y + 1,
+        Style::default().add_modifier(Modifier::BOLD),
+    );
+    center(
+        "f/esc to close",
+        rect.y + rect.height / 2,
+        Style::default().fg(Color::DarkGray),
+    );
+    center(
+        "color language by chromatone.center — visit the original ♥",
+        rect.y + rect.height - 2,
+        Style::default().fg(Color::DarkGray),
+    );
+
+    const NAMES: [&str; 12] = [
+        "A", "A#", "B", "C", "C#", "D", "D#", "E", "F", "F#", "G", "G#",
+    ];
+    const BLOB_W: i32 = 6;
+    let buf = f.buffer_mut();
+    let (cx, cy) = (
+        rect.x as f32 + rect.width as f32 / 2.0,
+        rect.y as f32 + rect.height as f32 / 2.0,
+    );
+    // terminal cells are ~2:1, so the x radius is double the y radius
+    let (rx, ry) = (22.0f32, 10.5f32);
+
+    for (i, name) in NAMES.iter().enumerate() {
+        // ascending clockwise, A at 12 o'clock (screen y grows downward)
+        let th = (-90.0 + i as f32 * 30.0).to_radians();
+        let bx = (cx + rx * th.cos()).round() as i32 - BLOB_W / 2;
+        let by = (cy + ry * th.sin()).round() as i32 - 1;
+        let (r, g, b) = note_color(69.0 + i as f32);
+        let color = Color::Rgb(r, g, b);
+        // readable label color against the swatch
+        let text = if 0.299 * r as f32 + 0.587 * g as f32 + 0.114 * b as f32 > 140.0 {
+            Color::Black
+        } else {
+            Color::White
+        };
+
+        for dx in 0..BLOB_W {
+            let x = (bx + dx) as u16;
+            // rounded pill: half-block caps above and below a solid middle
+            if let Some(cell) = buf.cell_mut((x, by as u16)) {
+                cell.set_char('▄').set_fg(color).set_bg(Color::Rgb(15, 15, 20));
+            }
+            if let Some(cell) = buf.cell_mut((x, (by + 1) as u16)) {
+                cell.set_char(' ').set_bg(color);
+            }
+            if let Some(cell) = buf.cell_mut((x, (by + 2) as u16)) {
+                cell.set_char('▀').set_fg(color).set_bg(Color::Rgb(15, 15, 20));
+            }
+        }
+        let lx = bx + (BLOB_W - name.len() as i32) / 2;
+        for (dx, ch) in name.chars().enumerate() {
+            if let Some(cell) = buf.cell_mut(((lx + dx as i32) as u16, (by + 1) as u16)) {
+                cell.set_char(ch).set_fg(text).set_bg(color);
+            }
+        }
     }
 }
 

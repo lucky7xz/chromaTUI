@@ -27,6 +27,7 @@ The whole screen is repainted every frame, so your terminal emulator matters mor
 | `←`/`→` (Shift = coarse) | adjust it |
 | `c` | auto-calibrate sensitivity (stay quiet ~1s) |
 | `?` | help overlay: keys + what each setting does |
+| `f` | note-color wheel: which note is which color |
 | `o` | flip orientation (pitch vertical ↔ horizontal) |
 | `Space` / `Enter` | pause / clear |
 | `r` | reset all settings to defaults (asks y/n) |

@@ -38,6 +38,7 @@ pub struct App {
     pub current_pitch: Option<(f32, f32, f32)>,
     pitch_tracker: PitchTracker,
     pub help_visible: bool,
+    pub wheel_visible: bool,
     pub pending_reset: bool,
     audio: audio::AudioInput,
     samples: Vec<f32>,
@@ -63,6 +64,7 @@ impl App {
             current_pitch: None,
             pitch_tracker: PitchTracker::new(),
             help_visible: false,
+            wheel_visible: false,
             pending_reset: false,
             audio,
             row: Vec::new(),
@@ -164,8 +166,18 @@ impl App {
             KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                 self.quit = true
             }
-            KeyCode::Char('?') => self.help_visible = !self.help_visible,
-            KeyCode::Esc => self.help_visible = false,
+            KeyCode::Char('?') => {
+                self.help_visible = !self.help_visible;
+                self.wheel_visible = false;
+            }
+            KeyCode::Char('f') => {
+                self.wheel_visible = !self.wheel_visible;
+                self.help_visible = false;
+            }
+            KeyCode::Esc => {
+                self.help_visible = false;
+                self.wheel_visible = false;
+            }
             KeyCode::Char('r') => self.pending_reset = true,
             KeyCode::Char(' ') => self.paused = !self.paused,
             KeyCode::Enter => {
