@@ -73,7 +73,15 @@ impl App {
             help_visible: false,
             wheel_visible: false,
             pending_reset: false,
-            toast: None,
+            // The server may have restored last session's route; make a
+            // non-default start impossible to miss.
+            toast: (audio.source == audio::InputSource::Internal).then(|| {
+                (
+                    "input: internal audio (restored from last session)".to_string(),
+                    Color::Cyan,
+                    Instant::now(),
+                )
+            }),
             audio,
             row: Vec::new(),
             scroll_acc: 0.0,

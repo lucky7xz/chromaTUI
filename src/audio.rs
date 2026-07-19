@@ -78,10 +78,13 @@ impl AudioInput {
         };
         stream.play().context("failed to start audio stream")?;
 
+        // Don't assume mic: the server may have restored last session's route.
+        let source = detect_source().unwrap_or(InputSource::Mic);
+
         Ok(AudioInput {
             sample_rate,
             device_name,
-            source: InputSource::Mic,
+            source,
             buffer,
             _stream: stream,
         })
@@ -144,21 +147,73 @@ fn pactl(args: &[&str]) -> Result<String> {
 /// PipeWire records on each source-output.
 fn our_source_output_id() -> Result<u32> {
     let listing = pactl(&["list", "source-outputs"])?;
-    let me = std::process::id().to_string();
+    parse_our_stream(&listing, &std::process::id().to_string())
+        .map(|(id, _)| id)
+        .ok_or_else(|| anyhow!("capture stream not registered with the audio server"))
+}
+
+/// Parse `pactl list source-outputs` for the block whose
+/// `application.process.id` is `pid`; returns (source-output id, source index).
+fn parse_our_stream(listing: &str, pid: &str) -> Option<(u32, u32)> {
     let mut current = None;
+    let mut source = None;
     for line in listing.lines() {
         let line = line.trim();
         if let Some(rest) = line.strip_prefix("Source Output #") {
             current = rest.trim().parse::<u32>().ok();
-        } else if let Some(pid) = line.strip_prefix("application.process.id = ") {
-            if pid.trim().trim_matches('"') == me {
-                if let Some(id) = current {
-                    return Ok(id);
+            source = None;
+        } else if let Some(rest) = line.strip_prefix("Source:") {
+            source = rest.trim().parse::<u32>().ok();
+        } else if let Some(p) = line.strip_prefix("application.process.id = ") {
+            if p.trim().trim_matches('"') == pid {
+                if let (Some(id), Some(src)) = (current, source) {
+                    return Some((id, src));
                 }
             }
         }
     }
-    Err(anyhow!("capture stream not registered with the audio server"))
+    None
+}
+
+/// Parse `pactl list short sources` (tab-separated `idx\tname\t…`) for the
+/// name of source `idx`.
+fn source_name_for_index(short_listing: &str, idx: u32) -> Option<&str> {
+    short_listing.lines().find_map(|line| {
+        let mut cols = line.split('\t');
+        (cols.next()?.trim().parse::<u32>().ok()? == idx).then(|| cols.next())?
+    })
+}
+
+/// Where did the server actually route our stream? WirePlumber's
+/// restore-stream re-pins new streams by application name, so the *last
+/// session's* choice wins over any assumption — quit on internal and the
+/// next launch starts on internal. `None` = can't tell (no pactl, or the
+/// stream never registered); the caller falls back to Mic.
+fn detect_source() -> Option<InputSource> {
+    let me = std::process::id().to_string();
+    // Stream registration is async relative to `stream.play()` returning.
+    let mut found = None;
+    for _ in 0..20 {
+        let listing = pactl(&["list", "source-outputs"]).ok()?;
+        if let Some(hit) = parse_our_stream(&listing, &me) {
+            found = Some(hit);
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    found?;
+    // Re-read after a beat: restore-stream may move the node right after it
+    // appears, and we want where it settled, not where it was born.
+    std::thread::sleep(std::time::Duration::from_millis(50));
+    let listing = pactl(&["list", "source-outputs"]).ok()?;
+    let (_, src_idx) = parse_our_stream(&listing, &me)?;
+    let sources = pactl(&["list", "short", "sources"]).ok()?;
+    let name = source_name_for_index(&sources, src_idx)?;
+    Some(if name.ends_with(".monitor") {
+        InputSource::Internal
+    } else {
+        InputSource::Mic
+    })
 }
 
 fn push_mono<T: Copy>(
@@ -175,5 +230,50 @@ fn push_mono<T: Copy>(
     let excess = buf.len().saturating_sub(CAPACITY);
     if excess > 0 {
         buf.drain(..excess);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Real `pactl list source-outputs` shape from this machine: two blocks,
+    /// ours second.
+    const LISTING: &str = "\
+Source Output #1346
+\tDriver: protocol-native.c
+\tSource: 51
+\tSample Specification: s16le 2ch 44100Hz
+\tProperties:
+\t\tapplication.name = \"ALSA plug-in [aplay]\"
+\t\tapplication.process.id = \"11111\"
+Source Output #1398
+\tDriver: protocol-native.c
+\tSource: 53
+\tSample Specification: s24-32le 2ch 48000Hz
+\tProperties:
+\t\tapplication.name = \"ALSA plug-in [chromatui]\"
+\t\tapplication.process.id = \"16844\"
+";
+
+    const SOURCES: &str = "\
+51\talsa_output.pci-0000_00_1f.3.HiFi__hw_sofhdadsp__sink.monitor\tPipeWire\ts24-32le 2ch 48000Hz\tRUNNING
+53\talsa_input.pci-0000_00_1f.3.HiFi__hw_sofhdadsp_6__source\tPipeWire\ts32le 2ch 48000Hz\tIDLE
+";
+
+    #[test]
+    fn finds_our_block_among_several() {
+        assert_eq!(parse_our_stream(LISTING, "16844"), Some((1398, 53)));
+        assert_eq!(parse_our_stream(LISTING, "11111"), Some((1346, 51)));
+        assert_eq!(parse_our_stream(LISTING, "99999"), None);
+    }
+
+    #[test]
+    fn maps_source_index_to_name() {
+        assert!(source_name_for_index(SOURCES, 51)
+            .is_some_and(|n| n.ends_with(".monitor")));
+        assert!(source_name_for_index(SOURCES, 53)
+            .is_some_and(|n| !n.ends_with(".monitor")));
+        assert_eq!(source_name_for_index(SOURCES, 42), None);
     }
 }

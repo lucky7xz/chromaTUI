@@ -4,6 +4,8 @@ The [Chromatone spectrogram](https://spectrogram.chromatone.center) rewritten in
 
 **Use it fullscreen** — below 140×35 cells it shows a "too small" screen. Needs a truecolor terminal and a microphone.
 
+https://github.com/user-attachments/assets/d5d2b7c4-d075-44e8-b167-f6fb28b2605d
+
 ## Build & run
 
 Needs a Rust toolchain ([rustup](https://rustup.rs)) and a working microphone.
