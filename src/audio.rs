@@ -1,16 +1,42 @@
 use std::collections::VecDeque;
+use std::process::Command;
 use std::sync::{Arc, Mutex};
 
-use anyhow::{Context, Result};
+use anyhow::{anyhow, Context, Result};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::SampleFormat;
 
 /// Enough for the largest FFT window (16384) with headroom.
 const CAPACITY: usize = 1 << 15;
 
+/// What the live capture stream is currently pointed at.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum InputSource {
+    Mic,
+    Internal,
+}
+
+impl InputSource {
+    pub fn label(self) -> &'static str {
+        match self {
+            InputSource::Mic => "microphone",
+            InputSource::Internal => "internal audio",
+        }
+    }
+
+    /// Short form for the always-visible panel footer.
+    pub fn short(self) -> &'static str {
+        match self {
+            InputSource::Mic => "mic",
+            InputSource::Internal => "internal",
+        }
+    }
+}
+
 pub struct AudioInput {
     pub sample_rate: f32,
     pub device_name: String,
+    pub source: InputSource,
     buffer: Arc<Mutex<VecDeque<f32>>>,
     _stream: cpal::Stream,
 }
@@ -55,9 +81,36 @@ impl AudioInput {
         Ok(AudioInput {
             sample_rate,
             device_name,
+            source: InputSource::Mic,
             buffer,
             _stream: stream,
         })
+    }
+
+    /// Flip between the mic and the default sink's monitor.
+    pub fn toggle_source(&mut self) -> Result<()> {
+        let next = match self.source {
+            InputSource::Mic => InputSource::Internal,
+            InputSource::Internal => InputSource::Mic,
+        };
+        self.set_source(next)
+    }
+
+    /// Reroute the *live* capture stream to `src` at the PipeWire/Pulse level.
+    ///
+    /// ALSA cannot name monitor sources, so re-opening the cpal stream could
+    /// never reach internal audio; moving the existing source-output can.
+    /// On failure `self.source` is left untouched.
+    pub fn set_source(&mut self, src: InputSource) -> Result<()> {
+        let target = match src {
+            InputSource::Mic => pactl(&["get-default-source"])?,
+            // The default sink's monitor, so this follows speakers/headphones.
+            InputSource::Internal => format!("{}.monitor", pactl(&["get-default-sink"])?),
+        };
+        let id = our_source_output_id()?;
+        pactl(&["move-source-output", &id.to_string(), &target])?;
+        self.source = src;
+        Ok(())
     }
 
     /// Copy the most recent `out.len()` samples, zero-padding the front
@@ -72,6 +125,40 @@ impl AudioInput {
             *dst = s;
         }
     }
+}
+
+/// Run pactl and return trimmed stdout.
+fn pactl(args: &[&str]) -> Result<String> {
+    let out = Command::new("pactl")
+        .args(args)
+        .output()
+        .context("pactl not found — input switching needs PipeWire or PulseAudio")?;
+    if !out.status.success() {
+        let err = String::from_utf8_lossy(&out.stderr);
+        return Err(anyhow!("pactl {}: {}", args[0], err.trim()));
+    }
+    Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
+}
+
+/// Find the id of *our* capture stream by matching the process id that
+/// PipeWire records on each source-output.
+fn our_source_output_id() -> Result<u32> {
+    let listing = pactl(&["list", "source-outputs"])?;
+    let me = std::process::id().to_string();
+    let mut current = None;
+    for line in listing.lines() {
+        let line = line.trim();
+        if let Some(rest) = line.strip_prefix("Source Output #") {
+            current = rest.trim().parse::<u32>().ok();
+        } else if let Some(pid) = line.strip_prefix("application.process.id = ") {
+            if pid.trim().trim_matches('"') == me {
+                if let Some(id) = current {
+                    return Ok(id);
+                }
+            }
+        }
+    }
+    Err(anyhow!("capture stream not registered with the audio server"))
 }
 
 fn push_mono<T: Copy>(

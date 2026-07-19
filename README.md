@@ -25,10 +25,11 @@ The whole screen is repainted every frame, so your terminal emulator matters mor
 |---|---|
 | `↑`/`↓` / `Tab` / `1`–`7` | select a control |
 | `←`/`→` (Shift = coarse) | adjust it |
-| `c` | auto-calibrate sensitivity (stay quiet ~1s) |
+| `c` | auto-calibrate sensitivity (mic: measures your room ~1s; internal: snaps to a fixed baseline) |
 | `?` | help overlay: keys + what each setting does |
 | `f` | note-color wheel: which note is which color |
 | `o` | flip orientation (pitch vertical ↔ horizontal) |
+| `i` | switch input: microphone ↔ internal audio |
 | `Space` / `Enter` | pause / clear |
 | `r` | reset all settings to defaults (asks y/n) |
 | `q` | quit (saves settings) |
@@ -38,7 +39,7 @@ The whole screen is repainted every frame, so your terminal emulator matters mor
 - **fft size** — pitch sharpness vs. responsiveness: bigger = tells close (low) notes apart better but reacts slower.
 - **smooth** — blends frames; 0 = instant and jittery, higher = calmer but smeared.
 - **speed** — waterfall scroll rate, ¼×–4×; slower shows more history, faster stretches detail.
-- **midpoint** — sensitivity: how loud a sound must be to show up. `c` sets it for your room automatically.
+- **midpoint** — sensitivity: how loud a sound must be to show up. `c` sets it automatically, and what that means depends on the input. On the **mic** it measures your room's noise floor for ~1s, so stay quiet — every room and mic gain is different, so it has to be measured. On **internal audio** nothing is measured: digital audio has a fixed reference (0 dBFS is the same on every machine), so `c` snaps to a constant baseline — a stable visual anchor, the same track always paints the same picture. The two levels don't transfer (internal arrives ~25 dB hotter than a mic hears the same sound), so hit `c` after switching with `i`.
 - **steep** — contrast: high = crisp on/off lines, low = soft gradients showing loudness.
 - **range lo/hi** — pitch span on screen; default C2–C6 (singing voice). Narrower = more detail per note.
 

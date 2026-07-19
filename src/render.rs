@@ -12,6 +12,7 @@ use ratatui::widgets::{Block, Borders, Clear, Paragraph, Widget};
 use ratatui::Frame;
 
 use crate::analysis::note_color;
+use crate::audio::InputSource;
 use crate::controls::{note_name, PARAMS};
 use crate::{App, MIN_COLS, MIN_ROWS};
 
@@ -219,13 +220,16 @@ fn draw_readout(f: &mut Frame, area: Rect, app: &App) {
 
 fn draw_status(f: &mut Frame, area: Rect, app: &App) {
     let msg = if app.calibration.is_some() {
-        Some(("measuring noise floor — stay quiet…", Color::Yellow))
+        Some(("measuring noise floor — stay quiet…".into(), Color::Yellow))
     } else if app.paused {
-        Some(("⏸ paused (space to resume)", Color::White))
+        Some(("⏸ paused (space to resume)".into(), Color::White))
     } else {
-        None
+        app.toast
+            .as_ref()
+            .map(|(text, color, _)| (text.clone(), *color))
     };
     if let Some((text, color)) = msg {
+        let text = text.as_str();
         let w = text.chars().count() as u16 + 2;
         let rect = Rect::new(area.x + (area.width.saturating_sub(w)) / 2, area.y, w, 1);
         f.render_widget(Clear, rect);
@@ -240,7 +244,7 @@ fn draw_status(f: &mut Frame, area: Rect, app: &App) {
 
 /// Always-visible compact controls pane, left side.
 fn draw_panel(f: &mut Frame, area: Rect, app: &App) {
-    let height = (PARAMS.len() + 3) as u16;
+    let height = (PARAMS.len() + 4) as u16;
     let rect = Rect::new(
         area.x + 2,
         area.y + area.height.saturating_sub(height) / 2,
@@ -273,6 +277,16 @@ fn draw_panel(f: &mut Frame, area: Rect, app: &App) {
         )));
     }
     lines.push(Line::from(""));
+    // Persistent input indicator: internal in cyan so a glance tells the
+    // sources apart; mic (the default) stays quiet gray.
+    let src_style = match app.source() {
+        InputSource::Mic => Style::default().fg(Color::Gray),
+        InputSource::Internal => Style::default().fg(Color::Cyan),
+    };
+    lines.push(Line::from(vec![
+        Span::styled(" i input: ", Style::default().fg(Color::DarkGray)),
+        Span::styled(app.source().short(), src_style),
+    ]));
     lines.push(Line::from(Span::styled(
         " ? help",
         Style::default().fg(Color::DarkGray),
@@ -298,9 +312,13 @@ fn draw_help(f: &mut Frame, area: Rect, app: &App) {
     };
     keyline("↑/↓ · tab · 1-7", "select a control");
     keyline("←/→", "adjust it (shift = coarse steps)");
-    keyline("c", "auto-calibrate sensitivity (stay quiet ~1s)");
+    keyline(
+        "c",
+        "auto-calibrate (mic: measures room noise ~1s · internal: fixed baseline)",
+    );
     keyline("f", "note-color wheel (which note is which color)");
     keyline("o", "flip orientation");
+    keyline("i", "switch input: microphone / internal audio");
     keyline("space / enter", "pause / clear the screen");
     keyline("r", "reset all settings to defaults");
     keyline("? / esc", "close this help");
@@ -319,7 +337,11 @@ fn draw_help(f: &mut Frame, area: Rect, app: &App) {
     }
     lines.push(Line::from(""));
     lines.push(Line::from(Span::styled(
-        format!("  mic: {}", app.device_name()),
+        format!("  input: {}", app.source_label()),
+        Style::default().fg(Color::DarkGray),
+    )));
+    lines.push(Line::from(Span::styled(
+        format!("  device: {}", app.device_name()),
         Style::default().fg(Color::DarkGray),
     )));
 

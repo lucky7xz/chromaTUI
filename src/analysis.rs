@@ -443,8 +443,24 @@ impl PitchTracker {
     }
 }
 
-/// Auto-calibration: watch the room for ~1.25s of frames, then place the
-/// midpoint just above the loudest background level observed.
+/// Midpoint anchor for internal audio.
+///
+/// A mic needs *measurement* — every room, mic, and gain stage is different.
+/// A digital capture does not: 0 dBFS is the same on every machine, so one
+/// constant maps levels identically every time and the same track always
+/// paints the same picture. (Measuring the playing content instead would move
+/// the threshold with whatever happened to be playing during the pass,
+/// robbing the user of a stable visual anchor.)
+///
+/// With the default steepness of 20: band averages around -25 dBFS (typical
+/// music content, raw ~0.56) read bright, quiet beds near -50 dBFS (raw
+/// ~0.32) stay dim, and digital silence (raw 0.01) renders black.
+pub const INTERNAL_BASELINE: f32 = 0.40;
+
+/// Mic auto-calibration: watch the room for ~1.25s of frames, then place the
+/// midpoint just above the loudest background level observed. Internal audio
+/// never runs this — it snaps to [`INTERNAL_BASELINE`], because a monitor of
+/// an idle sink is exact digital silence and has no noise floor to find.
 pub struct Calibration {
     frames_left: u32,
     peak: f32,
@@ -471,6 +487,123 @@ impl Calibration {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Run a full mic calibration pass over a repeating buffer.
+    fn calibrate(a: &mut Analyzer, samples: &[f32]) -> f32 {
+        let mut cal = Calibration::new();
+        let mut row = Vec::new();
+        for _ in 0..80 {
+            a.process(samples, 0.0, &mut row);
+            if let Some(mid) = cal.feed(&row, &a.bands) {
+                return mid;
+            }
+        }
+        panic!("calibration never finished");
+    }
+
+    /// Music-like content: a few strong low partials over a quiet noise bed.
+    fn music(n: usize, rate: f32) -> Vec<f32> {
+        let mut seed = 12345u32;
+        (0..n)
+            .map(|i| {
+                let t = i as f32 / rate;
+                seed = seed.wrapping_mul(1664525).wrapping_add(1013904223);
+                let noise = ((seed >> 8) as f32 / 8388608.0 - 1.0) * 0.0006;
+                let tau = std::f32::consts::TAU;
+                0.20 * (tau * 110.0 * t).sin()
+                    + 0.10 * (tau * 220.0 * t).sin()
+                    + 0.05 * (tau * 440.0 * t).sin()
+                    + noise
+            })
+            .collect()
+    }
+
+    fn room_noise(n: usize) -> Vec<f32> {
+        let mut seed = 1u32;
+        (0..n)
+            .map(|_| {
+                seed = seed.wrapping_mul(1664525).wrapping_add(1013904223);
+                ((seed >> 8) as f32 / 8388608.0 - 1.0) * 0.0006
+            })
+            .collect()
+    }
+
+    /// Mic calibration is unchanged by the internal-audio work.
+    #[test]
+    fn mic_calibration_thresholds_just_above_room_noise() {
+        let mut a = Analyzer::new(48000.0);
+        let noise = room_noise(a.fft_size);
+        let mid = calibrate(&mut a, &noise);
+        // Just above the noise it measured, not at the clamp floor.
+        assert!(
+            (0.15..0.25).contains(&mid),
+            "midpoint {mid} drifted from the mic baseline"
+        );
+        let mut row = Vec::new();
+        a.process(&noise, 0.0, &mut row);
+        let loudest = row
+            .iter()
+            .zip(&a.bands)
+            .fold(f32::MIN, |m, (v, b)| m.max(v + b.pink));
+        assert!(mid > loudest, "midpoint {mid} must sit above noise {loudest}");
+    }
+
+    /// The reported bug: an idle sink's monitor is exact digital silence, and
+    /// calibrating against it put the midpoint below every real signal,
+    /// saturating the whole screen. The fixed baseline must render silence
+    /// as black instead.
+    #[test]
+    fn internal_baseline_blanks_digital_silence() {
+        let mut a = Analyzer::new(48000.0);
+        let silence = vec![0.0; a.fft_size];
+        let mut row = Vec::new();
+        a.process(&silence, 0.0, &mut row);
+        let max = row
+            .iter()
+            .zip(&a.bands)
+            .fold(f32::MIN, |m, (v, b)| {
+                m.max(sigmoid(v + b.pink, INTERNAL_BASELINE, 20.0))
+            });
+        assert!(max < 0.01, "digital silence renders at brightness {max}");
+    }
+
+    /// The baseline is a *fixed* anchor, so it has to yield real contrast on
+    /// typical music content without any measurement: played notes bright,
+    /// empty spectrum dark.
+    #[test]
+    fn internal_baseline_leaves_contrast_on_music() {
+        let mut a = Analyzer::new(48000.0);
+        let samples = music(a.fft_size, 48000.0);
+        let mid = INTERNAL_BASELINE;
+
+        let mut row = Vec::new();
+        a.process(&samples, 0.0, &mut row);
+        let brightness: Vec<f32> = row
+            .iter()
+            .zip(&a.bands)
+            .map(|(v, b)| sigmoid(v + b.pink, mid, 20.0))
+            .collect();
+
+        // The 110 Hz partial (A2, MIDI 45) must read as lit up.
+        let loud = a
+            .bands
+            .iter()
+            .position(|b| (b.note - 45.0).abs() < 0.5)
+            .expect("A2 is inside the default range");
+        assert!(
+            brightness[loud] > 0.8,
+            "played note only reached {}",
+            brightness[loud]
+        );
+
+        // And most of the spectrum, which holds nothing, must stay dark.
+        let dark = brightness.iter().filter(|&&v| v < 0.2).count();
+        assert!(
+            dark > brightness.len() / 2,
+            "only {dark}/{} bands stayed dark — screen is saturated",
+            brightness.len()
+        );
+    }
 
     #[test]
     fn pitch_math() {

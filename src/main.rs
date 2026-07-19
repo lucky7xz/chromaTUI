@@ -16,7 +16,10 @@ use crossterm::terminal::{
 use ratatui::backend::CrosstermBackend;
 use ratatui::Terminal;
 
-use analysis::{Analyzer, Calibration, ColorMap, PitchTracker};
+use ratatui::style::Color;
+
+use analysis::{Analyzer, Calibration, ColorMap, PitchTracker, INTERNAL_BASELINE};
+use audio::InputSource;
 use controls::{Params, PARAMS};
 
 /// Below this the app shows the "go fullscreen" screen instead of the waterfall.
@@ -25,6 +28,8 @@ pub const MIN_ROWS: u16 = 35;
 
 const FRAME: Duration = Duration::from_micros(16_667); // 60 fps
 const HISTORY_CAP: usize = 1024;
+/// How long a transient status message stays on screen.
+const TOAST_TTL: Duration = Duration::from_secs(2);
 
 pub struct App {
     pub params: Params,
@@ -40,6 +45,8 @@ pub struct App {
     pub help_visible: bool,
     pub wheel_visible: bool,
     pub pending_reset: bool,
+    /// Transient message shown in the status line; expires on its own.
+    pub toast: Option<(String, Color, Instant)>,
     audio: audio::AudioInput,
     samples: Vec<f32>,
     row: Vec<f32>,
@@ -66,6 +73,7 @@ impl App {
             help_visible: false,
             wheel_visible: false,
             pending_reset: false,
+            toast: None,
             audio,
             row: Vec::new(),
             scroll_acc: 0.0,
@@ -77,6 +85,18 @@ impl App {
 
     pub fn device_name(&self) -> &str {
         &self.audio.device_name
+    }
+
+    pub fn source_label(&self) -> &'static str {
+        self.audio.source.label()
+    }
+
+    pub fn source(&self) -> InputSource {
+        self.audio.source
+    }
+
+    fn set_toast(&mut self, text: String, color: Color) {
+        self.toast = Some((text, color, Instant::now()));
     }
 
     /// Pixels along the frequency axis for the current orientation/size.
@@ -114,6 +134,12 @@ impl App {
             self.rebuild();
         }
         self.colors.ensure(self.params.midpoint, self.params.steep);
+
+        if let Some((_, _, at)) = &self.toast {
+            if at.elapsed() >= TOAST_TTL {
+                self.toast = None;
+            }
+        }
 
         self.audio.copy_latest(&mut self.samples);
         self.analyzer
@@ -178,6 +204,18 @@ impl App {
                 self.help_visible = false;
                 self.wheel_visible = false;
             }
+            KeyCode::Char('i') => match self.audio.toggle_source() {
+                Ok(()) => {
+                    let msg = match self.audio.source {
+                        InputSource::Mic => "input: microphone (c recalibrates)".into(),
+                        InputSource::Internal => {
+                            "input: internal audio (c sets the baseline)".into()
+                        }
+                    };
+                    self.set_toast(msg, Color::Cyan);
+                }
+                Err(e) => self.set_toast(format!("input switch failed: {e}"), Color::Red),
+            },
             KeyCode::Char('r') => self.pending_reset = true,
             KeyCode::Char(' ') => self.paused = !self.paused,
             KeyCode::Enter => {
@@ -188,11 +226,20 @@ impl App {
                 self.params.horizontal = !self.params.horizontal;
                 self.needs_rebuild = true;
             }
-            KeyCode::Char('c') => {
-                if self.calibration.is_none() {
-                    self.calibration = Some(Calibration::new());
+            KeyCode::Char('c') => match self.audio.source {
+                InputSource::Mic => {
+                    if self.calibration.is_none() {
+                        self.calibration = Some(Calibration::new());
+                    }
                 }
-            }
+                // Digital audio has a fixed reference (0 dBFS on every
+                // machine), so snap to the constant anchor instead of
+                // measuring whatever happens to be playing.
+                InputSource::Internal => {
+                    self.params.midpoint = INTERNAL_BASELINE;
+                    self.set_toast("midpoint set to internal baseline".into(), Color::Cyan);
+                }
+            },
             KeyCode::Tab => self.focus = (self.focus + 1) % PARAMS.len(),
             KeyCode::BackTab => self.focus = (self.focus + PARAMS.len() - 1) % PARAMS.len(),
             KeyCode::Char(d @ '1'..='7') => self.focus = d as usize - '1' as usize,
