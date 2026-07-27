@@ -4,7 +4,7 @@ The [Chromatone spectrogram](https://spectrogram.chromatone.center) rewritten in
 
 **Use it fullscreen** — below 140×35 cells it shows a "too small" screen. Needs a truecolor terminal and a microphone.
 
-https://github.com/user-attachments/assets/d5d2b7c4-d075-44e8-b167-f6fb28b2605d
+https://github.com/user-attachments/assets/c8998a62-3d22-483e-88fb-337cac565318
 
 ## Install
 
