@@ -131,8 +131,14 @@ impl AudioInput {
 }
 
 /// Run pactl and return trimmed stdout.
+///
+/// `LC_ALL=C` is not optional: `pactl list` field names ("Source Output #",
+/// "Source:") go through gettext, so on a localised desktop the listing we
+/// parse below comes back translated and matches nothing.
 fn pactl(args: &[&str]) -> Result<String> {
     let out = Command::new("pactl")
+        .env("LC_ALL", "C")
+        .env("LANGUAGE", "")
         .args(args)
         .output()
         .context("pactl not found — input switching needs PipeWire or PulseAudio")?;
@@ -147,32 +153,113 @@ fn pactl(args: &[&str]) -> Result<String> {
 /// PipeWire records on each source-output.
 fn our_source_output_id() -> Result<u32> {
     let listing = pactl(&["list", "source-outputs"])?;
-    parse_our_stream(&listing, &std::process::id().to_string())
-        .map(|(id, _)| id)
-        .ok_or_else(|| anyhow!("capture stream not registered with the audio server"))
+    let pid = std::process::id().to_string();
+    match parse_our_stream(&listing, &pid) {
+        Some((id, _)) => Ok(id),
+        None => {
+            dump_diagnostics(&listing);
+            Err(not_registered(&listing, &pid))
+        }
+    }
 }
 
-/// Parse `pactl list source-outputs` for the block whose
-/// `application.process.id` is `pid`; returns (source-output id, source index).
-fn parse_our_stream(listing: &str, pid: &str) -> Option<(u32, u32)> {
-    let mut current = None;
-    let mut source = None;
+/// One `Source Output #…` block, reduced to what identifies it.
+struct SourceOutput {
+    id: u32,
+    source: Option<u32>,
+    pid: Option<String>,
+    app: Option<String>,
+}
+
+/// Split `pactl list source-outputs` into blocks. Properties we don't need are
+/// ignored, and a block with an unparseable header is dropped.
+fn parse_source_outputs(listing: &str) -> Vec<SourceOutput> {
+    let mut outs: Vec<SourceOutput> = Vec::new();
     for line in listing.lines() {
         let line = line.trim();
         if let Some(rest) = line.strip_prefix("Source Output #") {
-            current = rest.trim().parse::<u32>().ok();
-            source = None;
-        } else if let Some(rest) = line.strip_prefix("Source:") {
-            source = rest.trim().parse::<u32>().ok();
-        } else if let Some(p) = line.strip_prefix("application.process.id = ") {
-            if p.trim().trim_matches('"') == pid {
-                if let (Some(id), Some(src)) = (current, source) {
-                    return Some((id, src));
-                }
+            if let Ok(id) = rest.trim().parse::<u32>() {
+                outs.push(SourceOutput { id, source: None, pid: None, app: None });
             }
+            continue;
+        }
+        let Some(cur) = outs.last_mut() else { continue };
+        let value = |s: &str| s.trim().trim_matches('"').to_string();
+        if let Some(rest) = line.strip_prefix("Source:") {
+            cur.source = rest.trim().parse::<u32>().ok();
+        } else if let Some(rest) = line.strip_prefix("application.process.id = ") {
+            cur.pid = Some(value(rest));
+        } else if let Some(rest) = line.strip_prefix("application.name = ") {
+            cur.app = Some(value(rest));
         }
     }
-    None
+    outs
+}
+
+/// Locate our own capture stream; returns (source-output id, source index).
+///
+/// Process id is the reliable key when the server records one. Some
+/// ALSA→PipeWire paths don't, so we fall back to the block named after us —
+/// but only if there is exactly one, since guessing would move a stranger's
+/// stream.
+fn parse_our_stream(listing: &str, pid: &str) -> Option<(u32, u32)> {
+    let outs = parse_source_outputs(listing);
+    let by_pid = outs.iter().find(|o| o.pid.as_deref() == Some(pid));
+    let ours = by_pid.or_else(|| {
+        let mut named = outs
+            .iter()
+            .filter(|o| o.app.as_deref().is_some_and(is_us) && o.pid.is_none());
+        named.next().filter(|_| named.next().is_none())
+    })?;
+    Some((ours.id, ours.source?))
+}
+
+/// PipeWire/Pulse label our stream "ALSA plug-in [chromatui]"; be lenient
+/// about the wrapper text.
+fn is_us(app: &str) -> bool {
+    app.to_ascii_lowercase().contains("chromatui")
+}
+
+/// The one failure users actually hit, worded so a screenshot tells us which
+/// cause it is: nothing listed at all (capture opened outside the sound
+/// server, so rerouting is impossible) versus listed-but-not-ours (our
+/// identifier is wrong).
+fn not_registered(listing: &str, pid: &str) -> anyhow::Error {
+    let outs = parse_source_outputs(listing);
+    if outs.is_empty() {
+        return anyhow!(
+            "no capture streams listed by pactl — mic opened outside PipeWire/PulseAudio"
+        );
+    }
+    let seen: Vec<String> = outs
+        .iter()
+        .map(|o| match (&o.pid, &o.app) {
+            (Some(p), _) => format!("pid {p}"),
+            (None, Some(a)) => format!("\"{a}\" (no pid)"),
+            (None, None) => "unnamed".into(),
+        })
+        .collect();
+    anyhow!(
+        "pid {pid} not among {} listed streams: {}",
+        outs.len(),
+        seen.join(", ")
+    )
+}
+
+/// Write the raw listing next to `pactl info` so the failure can be diagnosed
+/// from one run on a machine we don't have. Best effort — never fails a switch.
+fn dump_diagnostics(listing: &str) {
+    let path = std::env::temp_dir().join("chromatui-audio-debug.log");
+    let info = pactl(&["info"]).unwrap_or_else(|e| format!("<pactl info failed: {e}>"));
+    let sources = pactl(&["list", "short", "sources"]).unwrap_or_default();
+    let _ = std::fs::write(
+        &path,
+        format!(
+            "chromatui pid {}\n\n== pactl info ==\n{info}\n\n\
+             == list source-outputs ==\n{listing}\n\n== list short sources ==\n{sources}\n",
+            std::process::id()
+        ),
+    );
 }
 
 /// Parse `pactl list short sources` (tab-separated `idx\tname\t…`) for the
@@ -256,6 +343,22 @@ Source Output #1398
 \t\tapplication.process.id = \"16844\"
 ";
 
+    /// Same shape, but the server recorded no `application.process.id` for
+    /// our stream — the case pid matching cannot solve.
+    const LISTING_NO_PID: &str = "\
+Source Output #1346
+\tDriver: protocol-native.c
+\tSource: 51
+\tProperties:
+\t\tapplication.name = \"ALSA plug-in [aplay]\"
+\t\tapplication.process.id = \"11111\"
+Source Output #1398
+\tDriver: protocol-native.c
+\tSource: 53
+\tProperties:
+\t\tapplication.name = \"ALSA plug-in [chromatui]\"
+";
+
     const SOURCES: &str = "\
 51\talsa_output.pci-0000_00_1f.3.HiFi__hw_sofhdadsp__sink.monitor\tPipeWire\ts24-32le 2ch 48000Hz\tRUNNING
 53\talsa_input.pci-0000_00_1f.3.HiFi__hw_sofhdadsp_6__source\tPipeWire\ts32le 2ch 48000Hz\tIDLE
@@ -266,6 +369,42 @@ Source Output #1398
         assert_eq!(parse_our_stream(LISTING, "16844"), Some((1398, 53)));
         assert_eq!(parse_our_stream(LISTING, "11111"), Some((1346, 51)));
         assert_eq!(parse_our_stream(LISTING, "99999"), None);
+    }
+
+    #[test]
+    fn falls_back_to_app_name_when_pid_is_missing() {
+        // pid 99999 is not in the listing, but exactly one block is ours by name.
+        assert_eq!(parse_our_stream(LISTING_NO_PID, "99999"), Some((1398, 53)));
+    }
+
+    #[test]
+    fn refuses_to_guess_between_two_same_named_blocks() {
+        let two = LISTING_NO_PID.to_string()
+            + "Source Output #1400\n\tSource: 54\n\tProperties:\n\
+               \t\tapplication.name = \"ALSA plug-in [chromatui]\"\n";
+        assert_eq!(parse_our_stream(&two, "99999"), None);
+    }
+
+    #[test]
+    fn a_pid_match_wins_over_a_name_match() {
+        // Our own pid must beat a stale/other chromatui block.
+        let mixed = "Source Output #1\n\tSource: 5\n\tProperties:\n\
+                     \t\tapplication.name = \"ALSA plug-in [chromatui]\"\n\
+                     Source Output #2\n\tSource: 6\n\tProperties:\n\
+                     \t\tapplication.name = \"weird-wrapper\"\n\
+                     \t\tapplication.process.id = \"777\"\n";
+        assert_eq!(parse_our_stream(mixed, "777"), Some((2, 6)));
+    }
+
+    #[test]
+    fn error_distinguishes_empty_listing_from_no_match() {
+        let empty = not_registered("", "1234").to_string();
+        assert!(empty.contains("no capture streams"), "{empty}");
+
+        let unmatched = not_registered(LISTING, "1234").to_string();
+        assert!(unmatched.contains("1234"), "{unmatched}");
+        assert!(unmatched.contains('2'), "should say how many were listed");
+        assert!(!unmatched.contains("no capture streams"), "{unmatched}");
     }
 
     #[test]

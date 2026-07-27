@@ -229,6 +229,10 @@ fn draw_status(f: &mut Frame, area: Rect, app: &App) {
             .map(|(text, color, _)| (text.clone(), *color))
     };
     if let Some((text, color)) = msg {
+        // Diagnostic toasts can be longer than the pane; a rect wider than the
+        // area would render outside the buffer.
+        let budget = area.width.saturating_sub(2) as usize;
+        let text: String = text.chars().take(budget).collect();
         let text = text.as_str();
         let w = text.chars().count() as u16 + 2;
         let rect = Rect::new(area.x + (area.width.saturating_sub(w)) / 2, area.y, w, 1);
