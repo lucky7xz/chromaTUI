@@ -23,8 +23,10 @@ use audio::InputSource;
 use controls::{Params, PARAMS};
 
 /// Below this the app shows the "go fullscreen" screen instead of the waterfall.
-pub const MIN_COLS: u16 = 140;
-pub const MIN_ROWS: u16 = 35;
+/// Below this the waterfall still renders, it just gets coarse — the floor is
+/// the classic 80×24 so any terminal works, but bigger is much better.
+pub const MIN_COLS: u16 = 80;
+pub const MIN_ROWS: u16 = 24;
 
 const FRAME: Duration = Duration::from_micros(16_667); // 60 fps
 const HISTORY_CAP: usize = 1024;

@@ -50,7 +50,7 @@ fn draw_too_small(f: &mut Frame, area: Rect) {
             area.width, area.height
         )),
         Line::from(format!(
-            "Make the terminal fullscreen (needs at least {}×{}).",
+            "Resize to at least {}×{} — the bigger the better.",
             MIN_COLS, MIN_ROWS
         )),
     ];
@@ -403,6 +403,18 @@ mod tests {
         assert_eq!(quad_cell([BLACK, BLACK, BLACK, RED]).0, '▗');
     }
 
+    /// Overlays size themselves off the area, so a small terminal must not
+    /// build a rect wider than the buffer.
+    #[test]
+    fn overlays_fit_at_the_minimum_size_and_below() {
+        for (w, h) in [(MIN_COLS, MIN_ROWS), (20, 5), (1, 1)] {
+            let backend = ratatui::backend::TestBackend::new(w, h);
+            let mut term = ratatui::Terminal::new(backend).unwrap();
+            term.draw(|f| draw_wheel(f, f.area())).unwrap();
+            term.draw(|f| draw_too_small(f, f.area())).unwrap();
+        }
+    }
+
     #[test]
     fn wheel_layout_is_a_clock_face() {
         let backend = ratatui::backend::TestBackend::new(140, 35);
@@ -465,6 +477,10 @@ fn draw_wheel(f: &mut Frame, area: Rect) {
     );
 
     let mut center = |text: &str, y: u16, style: Style| {
+        // A short terminal clamps the rect, which can push a line past its end.
+        if y >= rect.bottom() {
+            return;
+        }
         let line = Rect::new(rect.x, y, rect.width, 1);
         Paragraph::new(Line::from(Span::styled(text.to_string(), style)))
             .alignment(Alignment::Center)
@@ -482,7 +498,7 @@ fn draw_wheel(f: &mut Frame, area: Rect) {
     );
     center(
         "color language by chromatone.center — visit the original ♥",
-        rect.y + rect.height - 2,
+        rect.bottom().saturating_sub(2),
         Style::default().fg(Color::DarkGray),
     );
 

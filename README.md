@@ -2,7 +2,7 @@
 
 The [Chromatone spectrogram](https://spectrogram.chromatone.center) rewritten in Rust for the terminal (ratatui). Speak at the mic and watch pitch the color: every A is red, one full rainbow per octave.
 
-**Use it fullscreen** — below 140×35 cells it shows a "too small" screen. Needs a truecolor terminal and a microphone.
+Runs from 80×24 up; below that it shows a "too small" screen. Every cell is 2×2 spectrogram pixels, so a fullscreen window buys real resolution. Needs a truecolor terminal and a microphone.
 
 https://github.com/user-attachments/assets/c8998a62-3d22-483e-88fb-337cac565318
 
